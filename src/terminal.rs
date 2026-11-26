@@ -1032,6 +1032,14 @@ impl TerminalView {
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
             self.clear_selection(cx);
         }
+        // Why not send it now: AppKit offers a key to the main menu (window tiling,
+        // App Shortcuts) only after the window declines it; as in Ghostty, the
+        // program gets it from the keyDown that follows.
+        #[cfg(target_os = "macos")]
+        if gpui_macos::asking_for_key_equivalent() && (k.modifiers.control || k.modifiers.function) {
+            gpui_macos::leave_key_to_menu();
+            return;
+        }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
             self.send(&bytes);

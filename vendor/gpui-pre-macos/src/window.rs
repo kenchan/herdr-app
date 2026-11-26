@@ -2661,12 +2661,27 @@ unsafe fn is_ime_input_source_active() -> bool {
 thread_local! {
     static KEY_TO_INPUT_METHOD: Cell<bool> = const { Cell::new(false) };
     static GIVING_KEY_TO_INPUT_METHOD: Cell<bool> = const { Cell::new(false) };
+    static ASKING_FOR_KEY_EQUIVALENT: Cell<bool> = const { Cell::new(false) };
+    static LEAVE_TO_MENU: Cell<bool> = const { Cell::new(false) };
+    static LEFT_TO_MENU_AT: Cell<Option<f64>> = const { Cell::new(None) };
 }
 
 /// HERDR: called while a key is dispatched: the app doesn't act on it, and AppKit's
 /// input method gets it instead (an SKK input method's Ctrl+J, for example).
 pub fn give_key_to_input_method() {
     KEY_TO_INPUT_METHOD.set(true);
+}
+
+/// HERDR: true while AppKit asks the window whether a key is a shortcut, before
+/// the main menu (system items such as window tiling, App Shortcuts) sees it.
+pub fn asking_for_key_equivalent() -> bool {
+    ASKING_FOR_KEY_EQUIVALENT.get()
+}
+
+/// HERDR: called while a key equivalent is dispatched: the app declines it, so AppKit
+/// offers it to the main menu, and a key the menu doesn't take comes back as keyDown.
+pub fn leave_key_to_menu() {
+    LEAVE_TO_MENU.set(true);
 }
 
 extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
@@ -2680,14 +2695,29 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
         return NO;
     };
 
+    // HERDR: AppKit can ask again about a key the app left to the menu (as Ghostty
+    // notes); the second time the app takes it. Synthetic events have no timestamp.
+    let timestamp: f64 = unsafe { msg_send![native_event, timestamp] };
+    let asking = key_equivalent && !(timestamp != 0.0 && LEFT_TO_MENU_AT.get() == Some(timestamp));
+    let left_to_menu = Cell::new(false);
     let run_callback = |event: PlatformInput| -> BOOL {
         let mut callback = window_state.as_ref().lock().event_callback.take();
+        ASKING_FOR_KEY_EQUIVALENT.set(asking);
+        LEAVE_TO_MENU.set(false);
         let handled: BOOL = if let Some(callback) = callback.as_mut() {
             !callback(event).propagate as BOOL
         } else {
             NO
         };
+        ASKING_FOR_KEY_EQUIVALENT.set(false);
         window_state.as_ref().lock().event_callback = callback;
+        if LEAVE_TO_MENU.take() {
+            // The keyDown that follows must reach the app, not be dropped as a repeat.
+            window_state.as_ref().lock().last_key_equivalent = None;
+            LEFT_TO_MENU_AT.set(Some(timestamp));
+            left_to_menu.set(true);
+            return NO;
+        }
         handled
     };
 
@@ -2792,6 +2822,10 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
             }
             if handled == YES {
                 return YES;
+            }
+            // HERDR: nor the input handler below: an fn key there never reaches the menu.
+            if left_to_menu.get() {
+                return NO;
             }
 
             if key_down_event.is_held
