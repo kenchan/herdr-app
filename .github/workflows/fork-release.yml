@@ -1,0 +1,39 @@
+# This fork's patched macOS app, for kenchan/nix-config. Upstream releases come from release.yml.
+name: fork release
+
+on:
+  push:
+    tags: ["[0-9]*-r[0-9]*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.95.0
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      # Why not scripts/package as is: HERDR_APP_RELEASE=1 makes the app update
+      # itself to upstream releases, which drops this fork's patches.
+      - name: Package without self-updates
+        run: |
+          sed -i '' 's/^HERDR_APP_RELEASE=1 cargo build/cargo build/' scripts/package
+          grep -q '^cargo build --release --locked' scripts/package
+          scripts/package
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/herdr-app-macos-aarch64.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "Herdr $GITHUB_REF_NAME: the upstream tag plus this fork's patches. Ad hoc signed, no self-updates."
